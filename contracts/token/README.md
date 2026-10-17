@@ -150,6 +150,8 @@ and `new_admin`. Not pause-gated.
 
 Authorization: current admin **and** `new_admin`.
 
+**Events:** `("admXfer",)` → `(old_admin: Address, new_admin: Address)`
+
 ---
 
 ### `name(env) -> String`
@@ -253,6 +255,45 @@ See [docs/ttl.md](../../docs/ttl.md).
 
 ---
 
+## Panic conditions
+
+The table below consolidates every `panic!` message in `src/lib.rs`. Use it
+to map on-chain error strings to the function and condition that triggered
+them.
+
+| Function | Panic message | Condition |
+|----------|---------------|-----------|
+| `__constructor` | `"decimals too large"` | `decimals > 18` |
+| `mint` | `"amount must be positive"` | `amount ≤ 0` |
+| `mint` | `"token is paused"` | Contract is paused |
+| `mint` | `"balance overflow"` | `to`'s balance + `amount` overflows `i128` |
+| `mint` | `"total supply overflow"` | `total_supply` + `amount` overflows `i128` |
+| `burn` | `"amount must be positive"` | `amount ≤ 0` |
+| `burn` | `"token is paused"` | Contract is paused |
+| `burn` | `"insufficient balance"` | `from`'s balance < `amount` |
+| `transfer` | `"amount must be positive"` | `amount ≤ 0` |
+| `transfer` | `"token is paused"` | Contract is paused |
+| `transfer` | `"insufficient balance"` | `from`'s balance < `amount` |
+| `transfer_from` | `"token is paused"` | Contract is paused |
+| `transfer_from` | `"allowance exceeded"` | Spender's allowance for `from` < `amount` |
+| `transfer_from` | `"amount must be positive"` | `amount ≤ 0` (enforced by inner `_transfer`) |
+| `transfer_from` | `"insufficient balance"` | `from`'s balance < `amount` |
+| `approve` | `"amount cannot be negative"` | `amount < 0` |
+| `approve` | `"token is paused"` | Contract is paused |
+| `transfer_admin` | `"not initialized"` | Admin key missing from instance storage |
+| `admin` | `"not initialized"` | Admin key missing from instance storage |
+
+> **Notes**
+> - `"balance overflow"` and `"total supply overflow"` originate in the
+>   internal `_mint` helper and surface through both `mint` and the
+>   `initial_supply > 0` branch of `__constructor`.
+> - `"amount must be positive"` in `transfer` / `transfer_from` is enforced
+>   inside the internal `_transfer` helper.
+> - `pause()` and `unpause()` have no panics beyond the implicit auth failure
+>   if the caller is not the admin (handled by `require_auth()`).
+
+---
+
 ## Events
 
 | Topic | Data | Emitted by |
@@ -263,3 +304,4 @@ See [docs/ttl.md](../../docs/ttl.md).
 | `("approve",)` | `(owner, spender, amount)` | `approve` |
 | `("pause",)` | `()` | `pause` |
 | `("unpause",)` | `()` | `unpause` |
+| `("admXfer",)` | `(old_admin, new_admin)` | `transfer_admin` |

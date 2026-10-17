@@ -99,6 +99,7 @@ soroban-vesting-platform/
 │   └── demo-testnet.sh # End-to-end testnet lifecycle demo
 ├── docs/
 │   ├── architecture.md
+│   ├── faq.md            # Common integration questions answered
 │   └── testnet-demo.md   # Manual walkthrough
 ├── .github/workflows/ci.yml
 ├── .env.example
@@ -144,9 +145,11 @@ chmod +x scripts/demo-testnet.sh
 cd backend && npm install && npm start
 ```
 
-> **Note:** `make deploy-testnet` and `scripts/deploy.sh` are out of date
-> (old build target, no constructor arguments). Use the `stellar contract`
-> commands below or `docs/testnet-demo.md` instead.
+> **Note:** `make deploy-testnet` is a convenience wrapper around `scripts/deploy.sh`.
+> Constructor arguments must be passed after `--` (e.g. `-- --admin "$ADMIN"`).
+> See [Deploy to Testnet](#deploy-to-testnet) for the full commands with all
+> required constructor arguments, or run `scripts/demo-testnet.sh` for an
+> end-to-end demo.
 
 ---
 
@@ -213,6 +216,21 @@ that walks through:
 2. Deploying both contracts
 3. Minting tokens and creating a vesting schedule
 4. Claiming vested tokens as the beneficiary
+
+---
+
+## FAQ
+
+See [docs/faq.md](docs/faq.md) for answers to common integration questions,
+including:
+
+- How the cliff + linear schedule works and what the rounding behaviour is
+- Why `revoke()` is not blocked by pause
+- Why `execute()` in the multisig is permissionless
+- How to use the multisig as the vesting admin
+- What `extend_ttl()` does and when to call it
+- How to restore an archived contract entry
+- Whether this is safe to use on mainnet
 
 ---
 
