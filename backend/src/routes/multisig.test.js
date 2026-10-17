@@ -103,4 +103,44 @@ describe('Multisig routes', () => {
       expect(res.body.data).toHaveProperty('threshold');
     });
   });
+
+  describe('POST /api/multisig/revoke-confirm', () => {
+    it('returns 202 with valid body', async () => {
+      const res = await request(app)
+        .post('/api/multisig/revoke-confirm')
+        .send({ owner: 'GABC', proposalId: 1 });
+      expect(res.status).toBe(202);
+      expect(res.body.success).toBe(true);
+    });
+
+    it('returns 400 when owner is missing', async () => {
+      const res = await request(app)
+        .post('/api/multisig/revoke-confirm')
+        .send({ proposalId: 1 });
+      expect(res.status).toBe(400);
+    });
+
+    it('returns 400 when proposalId is missing', async () => {
+      const res = await request(app)
+        .post('/api/multisig/revoke-confirm')
+        .send({ owner: 'GABC' });
+      expect(res.status).toBe(400);
+    });
+
+    it('returns 400 when body is empty', async () => {
+      const res = await request(app)
+        .post('/api/multisig/revoke-confirm')
+        .send({});
+      expect(res.status).toBe(400);
+    });
+
+    it('includes owner and proposalId in response data', async () => {
+      const res = await request(app)
+        .post('/api/multisig/revoke-confirm')
+        .send({ owner: 'GOWNER', proposalId: 42 });
+      expect(res.status).toBe(202);
+      expect(res.body.data.owner).toBe('GOWNER');
+      expect(res.body.data.proposalId).toBe(42);
+    });
+  });
 });
