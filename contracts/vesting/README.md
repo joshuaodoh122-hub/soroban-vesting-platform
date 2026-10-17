@@ -148,6 +148,19 @@ Returns 0 if nothing is claimable. Read-only; does not extend TTL.
 
 ---
 
+### `get_claimable_at(env, schedule_id: u64, timestamp: u64) -> i128`
+
+Returns the projected claimable amount for a schedule at an arbitrary
+`timestamp`. Useful for dashboards that want to show future vesting
+projections without waiting for that ledger.
+
+Computes `vested_amount(timestamp) − claimed_amount`, clamped to 0.
+Read-only — does **not** bump the instance or persistent TTL.
+
+**Panics:** `"schedule not found"` — schedule ID does not exist
+
+---
+
 ### `get_beneficiary_schedules(env, beneficiary: Address) -> Vec<u64>`
 
 Returns the list of schedule IDs for a beneficiary. Returns an empty vector

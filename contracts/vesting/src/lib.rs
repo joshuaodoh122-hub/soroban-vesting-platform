@@ -344,6 +344,25 @@ impl VestingContract {
         (Self::vested_amount(&schedule, now) - schedule.claimed_amount).max(0)
     }
 
+    /// Returns the projected claimable amount for a schedule at an arbitrary
+    /// `timestamp`, without waiting for that ledger.
+    ///
+    /// Useful for dashboards that want to show future vesting projections.
+    /// Computes `vested_amount(timestamp) − claimed_amount`, clamped to 0.
+    ///
+    /// Read-only — does **not** bump the instance or persistent TTL.
+    ///
+    /// # Panics
+    /// - [`VestingError::ScheduleNotFound`] — schedule ID does not exist.
+    pub fn get_claimable_at(env: Env, schedule_id: u64, timestamp: u64) -> i128 {
+        let schedule: VestingSchedule = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Schedule(schedule_id))
+            .unwrap_or_else(|| panic_with_error!(&env, VestingError::ScheduleNotFound));
+        (Self::vested_amount(&schedule, timestamp) - schedule.claimed_amount).max(0)
+    }
+
     pub fn get_beneficiary_schedules(env: Env, beneficiary: Address) -> Vec<u64> {
         env.storage()
             .persistent()
@@ -1810,6 +1829,140 @@ mod tests {
         let claimed = vesting.claim(&1u64);
         assert_eq!(claimed, 100_000);
         assert_eq!(token_client.balance(&beneficiary), 100_000);
+    }
+
+    // ── get_claimable_at tests ────────────────────────────────────────────────
+
+    /// Past timestamp (before cliff) returns 0.
+    #[test]
+    fn test_get_claimable_at_past_before_cliff() {
+        let (env, vesting_id, _admin, beneficiary, funder) = setup();
+        let token = new_token(&env, &funder, 100_000);
+        let vesting = VestingContractClient::new(&env, &vesting_id);
+        let start = env.ledger().timestamp();
+
+        let id = vesting.create_schedule(&CreateScheduleParams {
+            from: funder.clone(),
+            beneficiary: beneficiary.clone(),
+            token_address: token,
+            total_amount: 100_000,
+            start_time: start,
+            cliff_duration: 100,
+            total_duration: 200,
+        });
+
+        // Any timestamp before start + cliff_duration must return 0
+        assert_eq!(vesting.get_claimable_at(&id, &(start + 50)), 0);
+        assert_eq!(vesting.get_claimable_at(&id, &0u64), 0);
+    }
+
+    /// Timestamp equivalent to the current ledger matches get_claimable().
+    #[test]
+    fn test_get_claimable_at_present_equivalent() {
+        let (env, vesting_id, _admin, beneficiary, funder) = setup();
+        let token = new_token(&env, &funder, 100_000);
+        let vesting = VestingContractClient::new(&env, &vesting_id);
+        let start = env.ledger().timestamp();
+
+        let id = vesting.create_schedule(&CreateScheduleParams {
+            from: funder.clone(),
+            beneficiary: beneficiary.clone(),
+            token_address: token,
+            total_amount: 100_000,
+            start_time: start,
+            cliff_duration: 0,
+            total_duration: 100,
+        });
+
+        env.ledger().with_mut(|l| l.timestamp = start + 40);
+        let now = env.ledger().timestamp();
+
+        // get_claimable_at with the current timestamp must match get_claimable
+        assert_eq!(
+            vesting.get_claimable_at(&id, &now),
+            vesting.get_claimable(&id)
+        );
+    }
+
+    /// Future timestamp returns a projected amount greater than the current
+    /// claimable amount.
+    #[test]
+    fn test_get_claimable_at_future_timestamp() {
+        let (env, vesting_id, _admin, beneficiary, funder) = setup();
+        let token = new_token(&env, &funder, 100_000);
+        let vesting = VestingContractClient::new(&env, &vesting_id);
+        let start = env.ledger().timestamp();
+
+        let id = vesting.create_schedule(&CreateScheduleParams {
+            from: funder.clone(),
+            beneficiary: beneficiary.clone(),
+            token_address: token,
+            total_amount: 100_000,
+            start_time: start,
+            cliff_duration: 0,
+            total_duration: 100,
+        });
+
+        env.ledger().with_mut(|l| l.timestamp = start + 25);
+        let now_claimable = vesting.get_claimable(&id);
+
+        // Project to t=75 (75 000) — must be larger than current 25 000
+        let future_claimable = vesting.get_claimable_at(&id, &(start + 75));
+        assert!(
+            future_claimable > now_claimable,
+            "future claimable {future_claimable} should exceed current {now_claimable}"
+        );
+        assert_eq!(future_claimable, 75_000);
+    }
+
+    /// Timestamp at or beyond full duration returns total_amount minus already claimed.
+    #[test]
+    fn test_get_claimable_at_full_duration() {
+        let (env, vesting_id, _admin, beneficiary, funder) = setup();
+        let token = new_token(&env, &funder, 100_000);
+        let vesting = VestingContractClient::new(&env, &vesting_id);
+        let start = env.ledger().timestamp();
+
+        let id = vesting.create_schedule(&CreateScheduleParams {
+            from: funder.clone(),
+            beneficiary: beneficiary.clone(),
+            token_address: token,
+            total_amount: 100_000,
+            start_time: start,
+            cliff_duration: 0,
+            total_duration: 100,
+        });
+
+        // No tokens claimed yet; at end timestamp all 100 000 should be projectable
+        assert_eq!(vesting.get_claimable_at(&id, &(start + 100)), 100_000);
+        assert_eq!(vesting.get_claimable_at(&id, &(start + 9_999)), 100_000);
+    }
+
+    /// After a partial claim, get_claimable_at deducts the claimed amount.
+    #[test]
+    fn test_get_claimable_at_after_partial_claim() {
+        let (env, vesting_id, _admin, beneficiary, funder) = setup();
+        let token = new_token(&env, &funder, 100_000);
+        let vesting = VestingContractClient::new(&env, &vesting_id);
+        let start = env.ledger().timestamp();
+
+        let id = vesting.create_schedule(&CreateScheduleParams {
+            from: funder.clone(),
+            beneficiary: beneficiary.clone(),
+            token_address: token,
+            total_amount: 100_000,
+            start_time: start,
+            cliff_duration: 0,
+            total_duration: 100,
+        });
+
+        // Claim 50 000 at t=50
+        env.ledger().with_mut(|l| l.timestamp = start + 50);
+        vesting.claim(&id);
+
+        // Project to t=100: 100 000 vested − 50 000 claimed = 50 000 remaining
+        let projected = vesting.get_claimable_at(&id, &(start + 100));
+        assert_eq!(projected, 50_000);
     }
 
     // ── Overflow guards ───────────────────────────────────────────────────────
