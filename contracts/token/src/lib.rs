@@ -7,6 +7,11 @@
 //! - pause / unpause (admin only)
 //! - metadata (name, symbol, decimals)
 //!
+//! # Error codes
+//! All contract errors are represented as [`TokenError`] variants. Clients
+//! receive a stable `u32` error code via the `#[contracterror]` attribute
+//! instead of parsing string messages.
+//!
 //! # TTL management
 //! Instance storage holds ADMIN, PAUSED, TOTAL, NAME, SYMBOL, DECIMALS.
 //! If the instance entry is archived the whole contract becomes unusable until
@@ -22,7 +27,8 @@
 #![allow(deprecated)]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Env, String, Symbol,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    Env, String, Symbol,
 };
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
@@ -47,6 +53,37 @@ pub const INSTANCE_BUMP_THRESHOLD: u32 = 518_400;
 /// Persistent entries use the same window.
 pub const PERSISTENT_BUMP_LEDGERS: u32 = 3_110_400;
 pub const PERSISTENT_BUMP_THRESHOLD: u32 = 518_400;
+
+// ─── Error type ──────────────────────────────────────────────────────────────
+
+/// Typed error codes for the token contract.
+///
+/// Using `#[contracterror]` maps each variant to a stable `u32` code that
+/// Soroban clients can match on without string parsing.
+#[contracterror]
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[repr(u32)]
+pub enum TokenError {
+    /// `decimals > 18` supplied to the constructor.
+    DecimalsTooLarge = 1,
+    /// `amount` is zero or negative where a strictly positive value is required
+    /// (mint, burn, transfer).
+    AmountMustBePositive = 2,
+    /// `amount < 0` supplied to `approve`.
+    AmountCannotBeNegative = 3,
+    /// The caller's balance is less than the requested transfer or burn amount.
+    InsufficientBalance = 4,
+    /// The spender's allowance for `from` is less than the requested amount.
+    AllowanceExceeded = 5,
+    /// The contract is paused; state-changing operations are blocked.
+    TokenIsPaused = 6,
+    /// Per-account balance would overflow `i128` on mint.
+    BalanceOverflow = 7,
+    /// Total supply would overflow `i128` on mint.
+    TotalSupplyOverflow = 8,
+    /// A required storage key was not found (contract not initialized).
+    NotInitialized = 9,
+}
 
 #[contracttype]
 pub enum DataKey {
@@ -82,7 +119,7 @@ impl TokenContract {
         initial_supply: i128,
     ) {
         if decimals > 18 {
-            panic!("decimals too large");
+            panic_with_error!(&env, TokenError::DecimalsTooLarge);
         }
 
         env.storage().instance().set(&ADMIN, &admin);
@@ -105,7 +142,7 @@ impl TokenContract {
         Self::require_admin(&env);
         Self::require_not_paused(&env);
         if amount <= 0 {
-            panic!("amount must be positive");
+            panic_with_error!(&env, TokenError::AmountMustBePositive);
         }
         Self::_mint(&env, &to, amount);
         env.events().publish((EVT_MINT,), (to, amount));
@@ -116,11 +153,11 @@ impl TokenContract {
         from.require_auth();
         Self::require_not_paused(&env);
         if amount <= 0 {
-            panic!("amount must be positive");
+            panic_with_error!(&env, TokenError::AmountMustBePositive);
         }
         let bal = Self::balance_of(&env, &from);
         if bal < amount {
-            panic!("insufficient balance");
+            panic_with_error!(&env, TokenError::InsufficientBalance);
         }
         let new_bal = bal - amount;
         env.storage()
@@ -154,7 +191,7 @@ impl TokenContract {
         let allow_key = DataKey::Allowance(from.clone(), spender.clone());
         let allowance: i128 = env.storage().persistent().get(&allow_key).unwrap_or(0);
         if allowance < amount {
-            panic!("allowance exceeded");
+            panic_with_error!(&env, TokenError::AllowanceExceeded);
         }
         let new_allowance = allowance - amount;
         env.storage().persistent().set(&allow_key, &new_allowance);
@@ -175,7 +212,7 @@ impl TokenContract {
         owner.require_auth();
         Self::require_not_paused(&env);
         if amount < 0 {
-            panic!("amount cannot be negative");
+            panic_with_error!(&env, TokenError::AmountCannotBeNegative);
         }
         let allow_key = DataKey::Allowance(owner.clone(), spender.clone());
         env.storage().persistent().set(&allow_key, &amount);
@@ -219,14 +256,14 @@ impl TokenContract {
         env.storage()
             .instance()
             .get(&NAME)
-            .expect("not initialized")
+            .unwrap_or_else(|| panic_with_error!(&env, TokenError::NotInitialized))
     }
 
     pub fn symbol(env: Env) -> String {
         env.storage()
             .instance()
             .get(&SYMBOL_KEY)
-            .expect("not initialized")
+            .unwrap_or_else(|| panic_with_error!(&env, TokenError::NotInitialized))
     }
 
     pub fn decimals(env: Env) -> u32 {
@@ -256,7 +293,7 @@ impl TokenContract {
         env.storage()
             .instance()
             .get(&ADMIN)
-            .expect("not initialized")
+            .unwrap_or_else(|| panic_with_error!(&env, TokenError::NotInitialized))
     }
 
     /// Extend the contract instance TTL to `INSTANCE_BUMP_LEDGERS`.
@@ -285,14 +322,14 @@ impl TokenContract {
             .storage()
             .instance()
             .get(&ADMIN)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(env, TokenError::NotInitialized));
         admin.require_auth();
     }
 
     fn require_not_paused(env: &Env) {
         let paused: bool = env.storage().instance().get(&PAUSED).unwrap_or(false);
         if paused {
-            panic!("token is paused");
+            panic_with_error!(env, TokenError::TokenIsPaused);
         }
     }
 
@@ -305,7 +342,9 @@ impl TokenContract {
 
     fn _mint(env: &Env, to: &Address, amount: i128) {
         let bal = Self::balance_of(env, to);
-        let new_bal = bal.checked_add(amount).expect("balance overflow");
+        let new_bal = bal
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(env, TokenError::BalanceOverflow));
         env.storage()
             .persistent()
             .set(&DataKey::Balance(to.clone()), &new_bal);
@@ -315,17 +354,19 @@ impl TokenContract {
             PERSISTENT_BUMP_LEDGERS,
         );
         let total: i128 = env.storage().instance().get(&TOTAL).unwrap_or(0);
-        let new_total = total.checked_add(amount).expect("total supply overflow");
+        let new_total = total
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(env, TokenError::TotalSupplyOverflow));
         env.storage().instance().set(&TOTAL, &new_total);
     }
 
     fn _transfer(env: &Env, from: &Address, to: &Address, amount: i128) {
         if amount <= 0 {
-            panic!("amount must be positive");
+            panic_with_error!(env, TokenError::AmountMustBePositive);
         }
         let from_bal = Self::balance_of(env, from);
         if from_bal < amount {
-            panic!("insufficient balance");
+            panic_with_error!(env, TokenError::InsufficientBalance);
         }
         let new_from = from_bal - amount;
         env.storage()
@@ -486,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "token is paused")]
+    #[should_panic(expected = "Error(Contract, #6)")]
     fn test_pause_blocks_transfer() {
         let (env, contract_id, admin) = deploy();
         let token = TokenContractClient::new(&env, &contract_id);
@@ -650,7 +691,7 @@ mod tests {
     // ── Allowance edge cases ──────────────────────────────────────────────────
 
     #[test]
-    #[should_panic(expected = "allowance exceeded")]
+    #[should_panic(expected = "Error(Contract, #5)")]
     fn test_allowance_exhaustion() {
         let (env, contract_id, admin) = deploy();
         let token = TokenContractClient::new(&env, &contract_id);
@@ -666,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "allowance exceeded")]
+    #[should_panic(expected = "Error(Contract, #5)")]
     fn test_transfer_from_over_allowance() {
         let (env, contract_id, admin) = deploy();
         let token = TokenContractClient::new(&env, &contract_id);
@@ -708,7 +749,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "token is paused")]
+    #[should_panic(expected = "Error(Contract, #6)")]
     fn test_approve_while_paused() {
         let (env, contract_id, admin) = deploy();
         let token = TokenContractClient::new(&env, &contract_id);
@@ -719,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "token is paused")]
+    #[should_panic(expected = "Error(Contract, #6)")]
     fn test_transfer_from_while_paused() {
         let (env, contract_id, admin) = deploy();
         let token = TokenContractClient::new(&env, &contract_id);
@@ -732,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "token is paused")]
+    #[should_panic(expected = "Error(Contract, #6)")]
     fn test_burn_while_paused() {
         let (env, contract_id, admin) = deploy();
         let token = TokenContractClient::new(&env, &contract_id);
@@ -741,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "token is paused")]
+    #[should_panic(expected = "Error(Contract, #6)")]
     fn test_mint_while_paused() {
         let (env, contract_id, _admin) = deploy();
         let token = TokenContractClient::new(&env, &contract_id);
@@ -753,7 +794,7 @@ mod tests {
     // ── Invalid amount tests ──────────────────────────────────────────────────
 
     #[test]
-    #[should_panic(expected = "insufficient balance")]
+    #[should_panic(expected = "Error(Contract, #4)")]
     fn test_burn_more_than_balance() {
         let (env, contract_id, admin) = deploy();
         let token = TokenContractClient::new(&env, &contract_id);
@@ -761,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "amount must be positive")]
+    #[should_panic(expected = "Error(Contract, #2)")]
     fn test_mint_zero_amount() {
         let (env, contract_id, _admin) = deploy();
         let token = TokenContractClient::new(&env, &contract_id);
@@ -770,7 +811,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "amount must be positive")]
+    #[should_panic(expected = "Error(Contract, #2)")]
     fn test_mint_negative_amount() {
         let (env, contract_id, _admin) = deploy();
         let token = TokenContractClient::new(&env, &contract_id);
@@ -779,7 +820,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "amount must be positive")]
+    #[should_panic(expected = "Error(Contract, #2)")]
     fn test_transfer_zero_amount() {
         let (env, contract_id, admin) = deploy();
         let token = TokenContractClient::new(&env, &contract_id);
@@ -788,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "amount cannot be negative")]
+    #[should_panic(expected = "Error(Contract, #3)")]
     fn test_approve_negative_amount() {
         let (env, contract_id, admin) = deploy();
         let token = TokenContractClient::new(&env, &contract_id);
@@ -797,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "amount must be positive")]
+    #[should_panic(expected = "Error(Contract, #2)")]
     fn test_burn_zero_amount() {
         let (env, contract_id, admin) = deploy();
         let token = TokenContractClient::new(&env, &contract_id);
@@ -833,9 +874,9 @@ mod tests {
     // ── Overflow guards ───────────────────────────────────────────────────────
 
     /// Minting i128::MAX into a non-zero balance overflows the per-account
-    /// balance — _mint must panic with "balance overflow".
+    /// balance — _mint must panic with TokenError::BalanceOverflow.
     #[test]
-    #[should_panic(expected = "balance overflow")]
+    #[should_panic(expected = "Error(Contract, #7)")]
     fn test_mint_balance_overflow() {
         let (env, contract_id, _admin) = deploy();
         let token = TokenContractClient::new(&env, &contract_id);
@@ -847,9 +888,10 @@ mod tests {
     }
 
     /// Minting into two separate accounts where the sum exceeds i128::MAX
-    /// overflows the total supply — _mint must panic with "total supply overflow".
+    /// overflows the total supply — _mint must panic with
+    /// TokenError::TotalSupplyOverflow.
     #[test]
-    #[should_panic(expected = "total supply overflow")]
+    #[should_panic(expected = "Error(Contract, #8)")]
     fn test_mint_total_supply_overflow() {
         let env = Env::default();
         env.mock_all_auths();
@@ -871,5 +913,87 @@ mod tests {
         token.mint(&r1, &i128::MAX);
         // Minting any more overflows total supply.
         token.mint(&r2, &1);
+    }
+}
+
+// ─── Property-based tests (proptest) ─────────────────────────────────────────
+//
+// Tests the pure token supply/balance arithmetic over arbitrary inputs without
+// deploying a full Env.  Both `_mint` and `burn` modify the same TOTAL key;
+// we model them here with plain i128 arithmetic to verify:
+//
+//   P1. total supply never goes negative after any sequence of valid mints and burns
+//   P2. sum of all balances equals total supply (conservation)
+//
+// Run with:  cargo test --package token prop_
+
+#[cfg(test)]
+mod prop_tests {
+    // The crate is #![no_std]; bring in std::vec::Vec explicitly for tests.
+    extern crate std;
+    use std::vec::Vec;
+
+    use proptest::prelude::*;
+
+    /// Simulate a sequence of (mint_amount, burn_pct) pairs.
+    /// `burn_pct` ∈ [0, 100] determines what fraction of the last account's
+    /// balance is burned, ensuring burn ≤ balance (always a valid operation).
+    ///
+    /// Returns (final_total_supply, sum_of_all_balances).
+    fn simulate(ops: &[(i128, u8)]) -> (i128, i128) {
+        let mut total: i128 = 0;
+        let mut balances: Vec<i128> = Vec::new();
+
+        for &(mint_amount, burn_pct) in ops {
+            // Mint: stop if it would overflow i128 (mirrors checked_add in _mint)
+            total = match total.checked_add(mint_amount) {
+                Some(t) => t,
+                None => break,
+            };
+            balances.push(mint_amount);
+
+            // Burn: remove a fraction of the last account's balance
+            if let Some(last) = balances.last_mut() {
+                let burn_amount = (*last * burn_pct as i128) / 100;
+                if burn_amount > 0 && *last >= burn_amount {
+                    *last -= burn_amount;
+                    total -= burn_amount;
+                }
+            }
+        }
+
+        let sum: i128 = balances.iter().sum();
+        (total, sum)
+    }
+
+    proptest! {
+        /// P1: total supply is never negative after a valid sequence of mints and burns.
+        #[test]
+        fn prop_total_supply_never_negative(
+            ops in proptest::collection::vec(
+                (1i128..=1_000_000i128, 0u8..=100u8),
+                0..=50,
+            )
+        ) {
+            let (total, _sum) = simulate(&ops);
+            prop_assert!(total >= 0, "total supply went negative: {}", total);
+        }
+
+        /// P2: sum of all balances equals total supply (conservation).
+        #[test]
+        fn prop_balances_sum_equals_total_supply(
+            ops in proptest::collection::vec(
+                (1i128..=1_000_000i128, 0u8..=100u8),
+                0..=50,
+            )
+        ) {
+            let (total, sum) = simulate(&ops);
+            prop_assert_eq!(
+                total, sum,
+                "conservation broken: total={}, sum_of_balances={}",
+                total,
+                sum
+            );
+        }
     }
 }

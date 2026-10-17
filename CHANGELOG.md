@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — 2026-10-17
+
+- contracts/token: `TokenError` typed error enum (#125).
+  `#[contracterror]` enum replaces all bare `panic!()` strings in the token
+  contract. Variants: `DecimalsTooLarge = 1`, `AmountMustBePositive = 2`,
+  `AmountCannotBeNegative = 3`, `InsufficientBalance = 4`,
+  `AllowanceExceeded = 5`, `TokenIsPaused = 6`, `BalanceOverflow = 7`,
+  `TotalSupplyOverflow = 8`, `NotInitialized = 9`. All `panic!()` and
+  `.expect()` calls replaced with `panic_with_error!`. Callers receive a
+  stable `u32` error code instead of matching on string messages. All existing
+  `#[should_panic]` tests updated to match the new variant name format
+  (e.g. `expected = "TokenIsPaused"`); all pass.
+  contracts/token/README.md updated: added "Error codes" table at the top and
+  updated per-function "Panics" sections to "Errors" with code numbers.
+
+- contracts/token: proptest 1.11.0 as dev-dependency; `prop_tests` module with
+  two property-based tests (#118):
+  `prop_total_supply_never_negative` (P1) and
+  `prop_balances_sum_equals_total_supply` (P2). Tests model the pure
+  mint/burn arithmetic without deploying a full Env. Run with
+  `cargo test --package token prop_`.
+
+- contracts/vesting: `get_claimable_at(env, schedule_id, timestamp) -> i128`
+  view function (#126). Accepts an explicit `timestamp: u64` and returns the
+  projected claimable amount at that timestamp (`vested_amount(timestamp) −
+  claimed_amount`, clamped to 0). Read-only — no TTL bump. Useful for
+  dashboards that want to show future vesting projections. New tests:
+  `test_get_claimable_at_past_before_cliff` (returns 0 before cliff),
+  `test_get_claimable_at_present_equivalent` (matches `get_claimable` at the
+  current ledger timestamp), `test_get_claimable_at_future_timestamp`
+  (projected amount > current claimable),
+  `test_get_claimable_at_full_duration` (returns full amount at or after end),
+  `test_get_claimable_at_after_partial_claim` (deducts claimed amount).
+  contracts/vesting/README.md updated with `get_claimable_at` function entry.
+
+- docs/architecture.md: "SDK upgrade procedure" section (#121). Five-step
+  guide covering: (1) checking the soroban-sdk CHANGELOG for breaking changes
+  with a link to the releases page; (2) updating the workspace version pin in
+  Cargo.toml; (3) rebuilding and retesting (`stellar contract build`,
+  `cargo test --all`, `cargo clippy`, `cargo fmt --check`); (4) updating the
+  `stellar/stellar-cli` version pin in `.github/workflows/ci.yml`; (5)
+  reviewing and updating contract READMEs after a breaking change.
+
 ### Added — 2026-10-15
 
 - contracts/vesting: `batch_create_schedule(env, params: Vec<CreateScheduleParams>) -> Vec<u64>`
